@@ -1,3 +1,9 @@
+2001-04-12 14:11  stevegt
+
+	* Session.pm: significant rewrite to fix csh bug, provide real
+	detection of remote shell type, flush stderr and stdout before
+	every send
+
 2001-02-27 12:25  stevegt
 
 	* MANIFEST, Session.pm, test.pl, test1, t/sh.t, t/timeout.t,

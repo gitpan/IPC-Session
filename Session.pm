@@ -6,11 +6,11 @@ use IPC::Open3;
 
 use vars qw($VERSION);
 
-$VERSION = '0.04';
+$VERSION = '0.05';
 
 =head1 NAME
 
-IPC::Session - Drive interactive shell command sessions, local or remote (like 'expect')
+IPC::Session - Drive ssh or other interactive shell, local or remote (like 'expect')
 
 =head1 SYNOPSIS
 
@@ -64,7 +64,7 @@ provides functionality that is similar to 'expect' or Expect.pm,
 but in a lightweight more Perlish package, with discrete STDOUT, 
 STDERR, and return code processing.
 
-BTW, There's nothing inherently ssh-ish about IPC::Session -- it
+By the way, there's nothing inherently ssh-ish about IPC::Session -- it
 doesn't even know anything about ssh, as a matter of fact.  It will
 work with any interactive shell that supports 'echo'.  For instance,
 'make test' just drives a local /bin/sh session.
@@ -84,29 +84,146 @@ The timeout value can also be changed later; see L<"timeout()">.
 
 sub new
 {
-	my $class=shift;
-	$class = (ref $class || $class);
-	my $self={};
-	bless $self, $class;
+  my $class=shift;
+  $class = (ref $class || $class);
+  my $self={};
+  bless $self, $class;
 
-	my ($cmd,$timeout,$handler)=@_;
-	$self->{'handler'} = $handler || sub {die @_};
-	$timeout=60 unless defined $timeout;
-	$self->{'timeout'} = $timeout;
+  my ($cmd,$timeout,$handler)=@_;
+  $self->{'handler'} = $handler || sub {die @_};
+  $timeout=60 unless defined $timeout;
+  $self->{'timeout'} = $timeout;
 
-	local(*IN,*OUT,*ERR);  # so we can use more than one of these objects
-	open3(\*IN,\*OUT,\*ERR,$cmd) || &{$self->{'handler'}}($!);
-	
-	($self->{'stdin'},$self->{'stdout'},$self->{'stderr'}) = (*IN,*OUT,*ERR);
-	
-	# Set to autoflush.
-	for (*IN,*OUT,*ERR) {
-		select;
-		$|++;
-	}
-	select STDOUT;
+  local(*IN,*OUT,*ERR);  # so we can use more than one of these objects
+    open3(\*IN,\*OUT,\*ERR,$cmd) || &{$self->{'handler'}}($!);
 
-	return $self;
+  ($self->{'stdin'},$self->{'stdout'},$self->{'stderr'}) = (*IN,*OUT,*ERR);
+
+  # Set to autoflush.
+  for (*IN,*OUT,*ERR) {
+    select;
+    $|++;
+  }
+  select STDOUT;
+
+  # determine target shell
+  $self->{'shell'} = $self->getshell();
+
+  return $self;
+}
+
+sub getshell
+{
+  my $self=shift;
+  my ($tag, $shout);
+
+  $tag=$self->tx('stdin', "echo;echo csherrno=\$status\n");
+  $shout=$self->rx('stdout', $tag);
+  return "csh" if $shout =~ /csherrno=0/;
+
+  $tag=$self->tx('stdin', "echo;echo bsherrno=\$?\n");
+  $shout=$self->rx('stdout', $tag);
+  return "bsh" if $shout =~ /bsherrno=0/;
+
+  die "unable to determine remote shell\n";
+}
+
+sub tx
+{
+  my ($self,$handle,$cmd) = @_;
+  my $fh=$self->{$handle};
+  my $shell = $self->{'shell'} || "";
+
+  my $eot="_EoT_" . rand() . "_";
+
+  # run command
+  print $fh "$cmd\n";
+
+  print $fh "echo $eot";
+  print $fh " errno=\$?" if $shell eq "bsh";
+  print $fh " errno=\$status" if $shell eq "csh";
+  print $fh "\n";
+
+  # call /bin/sh to work around csh stupidity -- csh doesn't support
+  # redirection of stderr...  BUG this will only work if there is a
+  # /bin/sh on target machine
+  my $stderrcmd;
+  $stderrcmd="/bin/sh -c 'echo $eot >&2'\n" if $shell eq "csh";
+  $stderrcmd=            "echo $eot >&2\n"  if $shell eq "bsh";
+  print $fh $stderrcmd if $shell;
+  return $eot;
+}
+
+sub rx	
+{
+  my ($self,$handle, $eot, $timeout) = @_;
+  $timeout = $self->{'timeout'} unless defined($timeout);
+  my $fh=$self->{$handle};
+
+  my $rin = my $win = my $ein = '';
+  vec($rin,fileno($fh),1) = 1;
+  $ein = $rin;
+
+  # Why two nested loops?  So we can do eot pattern match (below)
+  # against a full line at a time, while getting one character at a
+  # time.  Do we need to get only one character at a time?  Probably
+  # not, but it evolved this way.  It does let us parse and linebreak
+  # on the \n character, include newlines in the output, but not
+  # include the eot marker.   
+
+  # get full text
+  my $out="";  
+  my $errno="";  
+  while (!select(undef,undef,my $eout=$ein,0))  # while !eof()
+  {
+    # get one line of text
+    my $outl = "";  
+    while (!select(undef,undef,my $eout=$ein,0))  # while !eof()
+    {
+      # wait for output on handle
+      my $nready=select(my $rout=$rin, undef, undef, $timeout);
+      return $nready if $timeout==0;
+
+      # handle timeout
+      &{$self->{'handler'}}("timeout on $handle") unless $nready;
+
+      # read one char
+      my $outc;  
+      sysread($self->{$handle},$outc,1) 
+	|| &{$self->{'handler'}}("read error from $handle");
+
+      # include newlines in output
+      $outl .= $outc;  
+      last if $outc eq "\n";
+    }
+    # store snarfed return code
+    $outl =~ /$eot errno=(\d+)/ && ($errno = $1);
+
+    # eot pattern match -- don't include eot tag in output
+    last if $outl =~ /$eot/; 
+    $out .= $outl;
+  }
+
+  return $out unless wantarray;
+  return $out,$errno;
+}
+
+sub rxready
+{
+  my $self=shift;
+  my $handle = shift;
+  return $self->rx($handle,"dummy",0);
+}
+
+sub rxflush
+{
+  my $self=shift;
+  my $handle = shift;
+  my $tag = shift || ".*";
+  while($self->rxready($handle))
+  {
+    $self->rx($handle,$tag)
+  }
 }
 
 =head2 $commandhandle = $session->send("hostname");  
@@ -133,58 +250,25 @@ sub send
 	my $self=shift;
 	my $cmd=join(' ',@_);
 
-	my $out;
-	my $outl;
-	my $eot="_EoT_" . rand() . "_";
-	$self->{'out'}{'errno'}="-666";
-	my $stdin = $self->{'stdin'};
-
-	# run command
-	print $stdin "$cmd\n";
-
-	# echo end-of-text markers on both stdout and stderr, also get return code
-	print $stdin "echo $eot errno=\$?\n";
-	# BUG the following line will only work if there is a /bin/sh
-	# on remote machine
-	print $stdin "/bin/sh -c 'echo $eot >&2'\n"; # call /bin/sh to work around csh stupidity
+	# send the command
+        $self->rxflush('stdout');
+        $self->rxflush('stderr');
+	my $tag = $self->tx('stdin',$cmd);
 
 	# snarf the output until we hit eot marker on both streams
-	for my $handle ('stdout', 'stderr')
-	{
-		my $rin = my $win = my $ein = '';
-		vec($rin,fileno($self->{$handle}),1) = 1;
-		$ein = $rin;
+	my ($stdout,$errno) = $self->rx('stdout', $tag);
+	my $stderr = $self->rx('stderr', $tag);
 
-		$out="";
-		while (!select(undef,undef,my $eout=$ein,0))  # while !eof()
-		{
-			$outl = "";
-			while (!select(undef,undef,my $eout=$ein,0))  # while !eof()
-			{
-				# wait for output on handle
-				select(my $rout=$rin, undef, undef, $self->{'timeout'}) 
-					|| &{$self->{'handler'}}("timeout on $handle");
-				# read one char
-				sysread($self->{$handle},my $outc,1) 
-					|| &{$self->{'handler'}}("read error from $handle");
+	$self->{'out'}{'stdout'} = $stdout;
+	$self->{'out'}{'stderr'} = $stderr;
+	$self->{'out'}{'errno'}  = $errno;
 
-				$outl .= $outc;
-				last if $outc eq "\n";
-			}
-			last if $outl =~ "$eot";
-			$out .= $outl;
-		}
-		# store snarfed output
-		$self->{'out'}{$handle} = $out;
-		# store snarfed return code
-		$outl =~ /$eot errno=(\d*)/ && ($self->{'out'}{'errno'} = $1);
-	}
 	return $self->{'out'}{'errno'} unless wantarray;
 	return ( 
-			errno => $self->{'out'}{'errno'}, 
-			stdout => $self->{'out'}{'stdout'}, 
-			stderr => $self->{'out'}{'stderr'}
-			);
+	    errno => $self->{'out'}{'errno'}, 
+	    stdout => $self->{'out'}{'stdout'}, 
+	    stderr => $self->{'out'}{'stderr'}
+	       );
 }
 
 =head2 print $session->stdout();  
@@ -236,7 +320,7 @@ Allows you to change the timeout for subsequent send() calls.
 The timeout value is in seconds.  Fractional seconds are allowed.  
 The timeout applies to all send() calls.  
 
-Returns the current timeout.  Can be called with no args.
+Returns the current timeout if called with no args.
 
 =cut
 
@@ -262,13 +346,15 @@ sub handler
 
 The remote shell command you specify in new() is assumed to not prompt
 for any passwords or present any challenge codes; i.e.; you must use
-.rhosts, authorized_keys, ssh-agent, or the equivalent.  This
-restriction may be removed in future versions of this module, but
-it's there now.  
+.rhosts, authorized_keys, ssh-agent, or the equivalent, and must be
+prepared to answer any passphrase prompt if using ssh.  You can
+either run ssh-add ahead of time and provide the passphrase, have
+your script do that itself, or simply set the passphrase to null (if
+your security model allows it).  
 
 =item *
 
-There must be a working /bin/sh on the target machine.
+There must be a working /bin/sh on the target machine. 
 
 =back
 
@@ -287,3 +373,26 @@ L<expect(1)>
 =cut
 
 1;
+
+__END__
+  my $vec = '';
+  vec($vec,fileno($self->{'stdout'}),1) = 1;
+  warn unpack("b*",$vec) . "\n";
+  select($vec, undef, undef, $self->{'timeout'})
+    && sysread($self->{'stdout'},my $shout,9999);
+  $shell="bsh" if $shout =~ /bsherrno=0/;
+
+
+  my $vstderr = '';
+  vec($vstderr,fileno($self->{'stdout'}),1) = 1;
+  warn unpack("b*",$rin) . "\n";
+  select($vstderr, undef, undef, $self->{'timeout'})
+
+
+    warn unpack("b*",$rin) . "\n";
+  vec($rin,fileno($self->{'stderr'}),1) = 1;
+
+
+  die;
+
+
