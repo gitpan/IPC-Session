@@ -1,7 +1,7 @@
-Changes
+ChangeLog
 MANIFEST
 Makefile.PL
 Session.pm
-test.pl
-test2
-test3
+t/csh.t
+t/sh.t
+t/timeout.t

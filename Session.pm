@@ -6,11 +6,11 @@ use IPC::Open3;
 
 use vars qw($VERSION);
 
-$VERSION = '0.03';
+$VERSION = '0.04';
 
 =head1 NAME
 
-IPC::Session - remote shell persistent session object; encapsulates open3()
+IPC::Session - Drive interactive shell command sessions, local or remote (like 'expect')
 
 =head1 SYNOPSIS
 
@@ -49,9 +49,9 @@ IPC::Session - remote shell persistent session object; encapsulates open3()
 =head1 DESCRIPTION
 
 This module encapsulates the open3() function call (see L<IPC::Open3>)
-and its associated 
-filehandles, making it easy to maintain multiple persistent 'ssh' 
-and/or 'rsh' sessions within the same perl script.  
+and its associated filehandles.  This makes it easy to maintain
+multiple interactive command sessions, such as multiple persistent
+'ssh' and/or 'rsh' sessions, within the same perl script.  
 
 The remote shell session is kept open for the life of the object; this
 avoids the overhead of repeatedly opening remote shells via multiple
@@ -63,6 +63,11 @@ For applications requiring remote command invocation, this module
 provides functionality that is similar to 'expect' or Expect.pm,
 but in a lightweight more Perlish package, with discrete STDOUT, 
 STDERR, and return code processing.
+
+BTW, There's nothing inherently ssh-ish about IPC::Session -- it
+doesn't even know anything about ssh, as a matter of fact.  It will
+work with any interactive shell that supports 'echo'.  For instance,
+'make test' just drives a local /bin/sh session.
 
 =head1 METHODS
 
@@ -139,7 +144,9 @@ sub send
 
 	# echo end-of-text markers on both stdout and stderr, also get return code
 	print $stdin "echo $eot errno=\$?\n";
-	print $stdin "echo $eot >&2 \n";
+	# BUG the following line will only work if there is a /bin/sh
+	# on remote machine
+	print $stdin "/bin/sh -c 'echo $eot >&2'\n"; # call /bin/sh to work around csh stupidity
 
 	# snarf the output until we hit eot marker on both streams
 	for my $handle ('stdout', 'stderr')
@@ -172,7 +179,7 @@ sub send
 		# store snarfed return code
 		$outl =~ /$eot errno=(\d*)/ && ($self->{'out'}{'errno'} = $1);
 	}
-	return $self->{'errno'} unless wantarray;
+	return $self->{'out'}{'errno'} unless wantarray;
 	return ( 
 			errno => $self->{'out'}{'errno'}, 
 			stdout => $self->{'out'}{'stdout'}, 
@@ -253,11 +260,15 @@ sub handler
 
 =item *
 
-The remote shell command you specify in new() is assumed to not prompt for 
-any passwords or present any 
-challenge codes; i.e.; you must use .rhosts or the equivalent.  This
-restriction may be removed in future versions of this module, but it's 
-there now.  
+The remote shell command you specify in new() is assumed to not prompt
+for any passwords or present any challenge codes; i.e.; you must use
+.rhosts, authorized_keys, ssh-agent, or the equivalent.  This
+restriction may be removed in future versions of this module, but
+it's there now.  
+
+=item *
+
+There must be a working /bin/sh on the target machine.
 
 =back
 
