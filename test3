@@ -1,0 +1,35 @@
+#!/usr/bin/perl -w
+use strict;
+use IPC::Session;
+
+# open ssh session to scramjet
+# -- set timeout of 30 seconds for all send() calls
+my $session = new IPC::Session("ssh scramjet",30);
+
+$session->send("hostname");  # run `hostname` command on scramjet
+print $session->stdout();  # prints "scramjet"
+$session->send("date");  # run `date` within same ssh
+print $session->stdout();  # prints date
+
+# use like 'expect':
+$session->send("uname -s");
+my $netstat;
+for ($session->stdout)
+{
+	/IRIX/ && do { $netstat = "/usr/etc/netstat" };
+	/ConvexOS/ && do { $netstat = "/usr/ucb/netstat" };
+	/Linux/ && do { $netstat = "/bin/netstat" };
+}
+
+# errno returned in scalar context:
+my $errno = $session->send("$netstat -rn");
+	# try this:
+my $user = $ENV{LOGNAME};
+$session->send("grep '^$user:' /etc/passwd") && warn "$user not there";
+
+	# hash returned in array context:
+	my %netstat = $session->send("$netstat -in");
+	print "$netstat{'stdout'}\n";  # prints interface table
+	print "$netstat{'stderr'}\n";  # prints nothing (hopefully)
+	print "$netstat{'errno'}\n";   # prints 0
+

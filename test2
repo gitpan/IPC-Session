@@ -1,0 +1,40 @@
+#!/bin/perl -w
+
+
+use Session;
+$user="stevegt";
+
+# open ssh session to sally
+my $session = new IPC::Session("ssh sally",15);
+
+$session->send("hostname");  # run `hostname` command on sally
+print $session->stdout();  # prints "sally"
+$session->send("date");  # run `date` within same ssh
+print $session->stdout();  # prints date
+
+# THIS SHOULD TIMEOUT
+$session->timeout(5);
+print $session->timeout() . "\n";
+$session->send("sleep 9999");  # run `date` within same ssh
+print $session->stdout();  # prints date
+
+# use like 'expect':
+$session->send("uname -s");
+for ($session->stdout)
+{
+	/IRIX/ && do { $netstat = "/usr/etc/netstat" };
+	/ConvexOS/ && do { $netstat = "/usr/ucb/netstat" };
+	/Linux/ && do { $netstat = "/bin/netstat" };
+}
+
+# errno returned in scalar context:
+$errno = $session->send("$netstat -rn");
+# try this:
+$session->send("grep '^$user:' /etc/passwd") && warn "$user not there";
+
+# hash returned in array context:
+%netstat = $session->send("$netstat -in");
+print "$netstat{'stdout'}\n";  # prints interface table
+print "$netstat{'stderr'}\n";  # prints nothing (hopefully)
+print "$netstat{'errno'}\n";   # prints 0
+
